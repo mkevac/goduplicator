@@ -14,6 +14,7 @@ goduplicator is a TCP proxy, so it does not care which higher level protocol you
 
 Download binary
 ---------------
+You can download binary files here: https://github.com/mkevac/goduplicator/releases
 
 Install from source
 -------------------
