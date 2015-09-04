@@ -1,4 +1,4 @@
-goduplicator
+goduplicator [![Build Status](https://travis-ci.org/mkevac/goduplicator.svg?branch=master)](https://travis-ci.org/mkevac/goduplicator)
 ============
 
 Why you may need this?
