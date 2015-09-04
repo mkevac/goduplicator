@@ -12,12 +12,21 @@ goduplicator is a reverse proxy. It mirrors the data to all configured servers. 
 
 goduplicator is a TCP proxy, so it does not care which higher level protocol you are using.
 
+Download binary
+---------------
+
+Install from source
+-------------------
+You would need Go language installed. Just execute this command:
+```
+go get github.com/mkevac/goduplicator
+```
+
 Usage
 -----
+```
 ./goduplicator -l ':8080' -f ':8081' -m ':8082' -m ':8083'
-
 -l is a listening address
-
 -f is am address of a main server
-
 -m is an address of a mirror server (there could be more than one)
+```
