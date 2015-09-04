@@ -15,6 +15,9 @@ goduplicator is a TCP proxy, so it does not care which higher level protocol you
 Usage
 -----
 ./goduplicator -l ':8080' -f ':8081' -m ':8082' -m ':8083'
+
 -l is a listening address
+
 -f is am address of a main server
+
 -m is an address of a mirror server (there could be more than one)
