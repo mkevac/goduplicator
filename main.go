@@ -11,7 +11,15 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const defaultBufferSize = 1024
+const (
+	defaultBufferSize = 1024
+	SPLICE_F_MOVE     = 1
+	SPLICE_F_NONBLOCK = 2
+	SPLICE_F_MORE     = 4
+	SPLICE_F_GIFT     = 8
+	MaxUint           = ^uint(0)
+	MaxInt            = int(MaxUint >> 1)
+)
 
 func readAndDiscard(c net.Conn, errCh chan error) {
 	for {
@@ -46,41 +54,23 @@ func forwardSplice(from net.Conn, to net.Conn, errCh chan error) {
 	}
 
 	for {
-		_, err = unix.Splice(int(fromFile.Fd()), nullPtr, p[1], nullPtr, 1024, 0)
+		_, err = unix.Splice(int(fromFile.Fd()), nullPtr, p[1], nullPtr, MaxInt, SPLICE_F_MOVE)
 		if err != nil {
 			log.Fatalf("error while splicing from conn to pipe: %s", err)
 		}
-
-		_, err = unix.Splice(p[0], nullPtr, int(toFile.Fd()), nullPtr, 1024, 0)
+		_, err = unix.Splice(p[0], nullPtr, int(toFile.Fd()), nullPtr, MaxInt, SPLICE_F_MOVE)
 		if err != nil {
 			log.Fatalf("error while splicing from pipe to conn: %s", err)
 		}
 	}
 }
 
-func forward(from net.Conn, to net.Conn, errCh chan error) {
-	for {
-		var b [defaultBufferSize]byte
-
-		n, err := from.Read(b[:])
-		if err != nil {
-			errCh <- err
-			return
-		}
-
-		_, err = to.Write(b[:n])
-		if err != nil {
-			errCh <- err
-			return
-		}
-	}
-}
-
-func forwardAndCopyZeroCopy(from net.Conn, to net.Conn, mirrors []net.Conn, errCh chan error) {
+func forwardAndZeroCopy(from net.Conn, to net.Conn, mirrors []net.Conn, errCh chan error) {
 	var (
 		p           [2]int
 		nullPtr     *int64
 		mirrorFiles []*os.File
+		mirrorPipes [][2]int
 	)
 
 	err := unix.Pipe(p[:])
@@ -104,24 +94,37 @@ func forwardAndCopyZeroCopy(from net.Conn, to net.Conn, mirrors []net.Conn, errC
 			log.Fatalf("error while creating File() from incoming connection: %s", err)
 		}
 		mirrorFiles = append(mirrorFiles, mFile)
+
+		var mPipe [2]int
+
+		err = unix.Pipe(mPipe[:])
+		if err != nil {
+			log.Fatalf("pipe() error: %s", err)
+		}
+		mirrorPipes = append(mirrorPipes, mPipe)
+
+		go func(p int, f os.File) { // splice data from pipe to conn
+			for {
+				_, err = unix.Splice(p, nullPtr, int(f.Fd()), nullPtr, MaxInt, SPLICE_F_MOVE)
+				if err != nil {
+					log.Fatalf("error while splicing from pipe to conn: %s", err)
+				}
+			}
+		}(mPipe[0], *mFile)
 	}
 
-	go func() { // splice data from conn to pipe
-		for {
-			_, err = unix.Splice(int(fromFile.Fd()), nullPtr, p[1], nullPtr, 1024, 0)
-			if err != nil {
-				log.Fatalf("error while splicing from conn to pipe: %s", err)
-			}
-		}
-	}()
-
 	for {
-		nteed, err := unix.Tee(p[0], int(mirrorFiles[0].Fd()), 1024, 0)
+		_, err = unix.Splice(int(fromFile.Fd()), nullPtr, p[1], nullPtr, MaxInt, SPLICE_F_MOVE)
+		if err != nil {
+			log.Fatalf("error while splicing from conn to pipe: %s", err)
+		}
+
+		nteed, err := unix.Tee(p[0], mirrorPipes[0][1], MaxInt, SPLICE_F_MOVE)
 		if err != nil {
 			log.Fatalf("error while tee(): %s", err)
 		}
 
-		_, err = unix.Splice(p[0], nullPtr, int(toFile.Fd()), nullPtr, int(nteed), 0)
+		_, err = unix.Splice(p[0], nullPtr, int(toFile.Fd()), nullPtr, int(nteed), SPLICE_F_MOVE)
 		if err != nil {
 			log.Fatalf("error while splice(): %s", err)
 		}
