@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 const defaultBufferSize = 1024
@@ -17,6 +20,40 @@ func readAndDiscard(c net.Conn, errCh chan error) {
 		if err != nil {
 			errCh <- err
 			return
+		}
+	}
+}
+
+func forwardSplice(from net.Conn, to net.Conn, errCh chan error) {
+	var (
+		p       [2]int
+		nullPtr *int64
+	)
+
+	err := unix.Pipe(p[:])
+	if err != nil {
+		log.Fatalf("pipe() error: %s", err)
+	}
+
+	fromFile, err := from.(*net.TCPConn).File()
+	if err != nil {
+		log.Fatalf("error while creating File() from incoming connection: %s", err)
+	}
+
+	toFile, err := to.(*net.TCPConn).File()
+	if err != nil {
+		log.Fatalf("error while creating File() from outgoing connection: %s", err)
+	}
+
+	for {
+		_, err = unix.Splice(int(fromFile.Fd()), nullPtr, p[1], nullPtr, 1024, 0)
+		if err != nil {
+			log.Fatalf("error while splicing from conn to pipe: %s", err)
+		}
+
+		_, err = unix.Splice(p[0], nullPtr, int(toFile.Fd()), nullPtr, 1024, 0)
+		if err != nil {
+			log.Fatalf("error while splicing from pipe to conn: %s", err)
 		}
 	}
 }
@@ -37,6 +74,59 @@ func forward(from net.Conn, to net.Conn, errCh chan error) {
 			return
 		}
 	}
+}
+
+func forwardAndCopyZeroCopy(from net.Conn, to net.Conn, mirrors []net.Conn, errCh chan error) {
+	var (
+		p           [2]int
+		nullPtr     *int64
+		mirrorFiles []*os.File
+	)
+
+	err := unix.Pipe(p[:])
+	if err != nil {
+		log.Fatalf("pipe() error: %s", err)
+	}
+
+	fromFile, err := from.(*net.TCPConn).File()
+	if err != nil {
+		log.Fatalf("error while creating File() from incoming connection: %s", err)
+	}
+
+	toFile, err := to.(*net.TCPConn).File()
+	if err != nil {
+		log.Fatalf("error while creating File() from outgoing connection: %s", err)
+	}
+
+	for _, m := range mirrors {
+		mFile, err := m.(*net.TCPConn).File()
+		if err != nil {
+			log.Fatalf("error while creating File() from incoming connection: %s", err)
+		}
+		mirrorFiles = append(mirrorFiles, mFile)
+	}
+
+	go func() { // splice data from conn to pipe
+		for {
+			_, err = unix.Splice(int(fromFile.Fd()), nullPtr, p[1], nullPtr, 1024, 0)
+			if err != nil {
+				log.Fatalf("error while splicing from conn to pipe: %s", err)
+			}
+		}
+	}()
+
+	for {
+		nteed, err := unix.Tee(p[0], int(mirrorFiles[0].Fd()), 1024, 0)
+		if err != nil {
+			log.Fatalf("error while tee(): %s", err)
+		}
+
+		_, err = unix.Splice(p[0], nullPtr, int(toFile.Fd()), nullPtr, int(nteed), 0)
+		if err != nil {
+			log.Fatalf("error while splice(): %s", err)
+		}
+	}
+
 }
 
 func forwardAndCopy(from net.Conn, to net.Conn, mirrors []net.Conn, errCh chan error) {
@@ -71,7 +161,7 @@ func connect(origin net.Conn, forwarder net.Conn, mirrors []net.Conn, errCh chan
 		go readAndDiscard(mirrors[i], errCh)
 	}
 
-	go forward(forwarder, origin, errCh)
+	go forwardSplice(forwarder, origin, errCh)
 	go forwardAndCopy(origin, forwarder, mirrors, errCh)
 }
 
