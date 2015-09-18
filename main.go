@@ -149,10 +149,14 @@ func forwardAndZeroCopy(from net.Conn, to net.Conn, mirrors []net.Conn, errCh ch
 			return
 		}
 
-		nteed, err := unix.Tee(p[0], mirrorPipes[0][1], MaxInt, SPLICE_F_MOVE)
-		if err != nil {
-			errCh <- fmt.Errorf("error while tee(): %s", err)
-			return
+		nteed := int64(MaxInt)
+
+		if len(mirrorPipes) > 0 {
+			nteed, err = unix.Tee(p[0], mirrorPipes[0][1], MaxInt, SPLICE_F_MOVE)
+			if err != nil {
+				errCh <- fmt.Errorf("error while tee(): %s", err)
+				return
+			}
 		}
 
 		_, err = unix.Splice(p[0], nullPtr, int(toFile.Fd()), nullPtr, int(nteed), SPLICE_F_MOVE)
@@ -234,7 +238,7 @@ func main() {
 	flag.Var(&mirrorAddresses, "m", "comma separated list of mirror addresses (e.g. 'localhost:8082,localhost:8083')")
 	flag.Parse()
 
-	if listenAddress == "" || forwardAddress == "" || len(mirrorAddresses) == 0 {
+	if listenAddress == "" || forwardAddress == "" {
 		flag.Usage()
 		return
 	}
