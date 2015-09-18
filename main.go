@@ -270,9 +270,10 @@ func main() {
 			for _, addr := range mirrorAddresses {
 				c, err := net.Dial("tcp", addr)
 				if err != nil {
-					log.Fatalf("error while connecting to mirror %s: %s", addr, err)
+					log.Printf("error while connecting to mirror %s: %s", addr, err)
+				} else {
+					mirrorConns = append(mirrorConns, c)
 				}
-				mirrorConns = append(mirrorConns, c)
 			}
 
 			errCh := make(chan error, 1024)
