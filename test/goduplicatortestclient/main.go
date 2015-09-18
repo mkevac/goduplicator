@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"flag"
 	"sync/atomic"
 	"time"
@@ -13,6 +14,7 @@ var (
 	serverAddress string
 	parallel      uint
 	requests      uint64
+	messageSize   uint
 )
 
 func client() {
@@ -23,10 +25,11 @@ func client() {
 
 	r := bufio.NewReader(c)
 
-	stringToSend := []byte("markomarkomarkomarkomarkomarkomarkomarko\n")
+	bufferToSend := bytes.Repeat([]byte("a"), int(messageSize-1))
+	bufferToSend = append(bufferToSend, '\n')
 
 	for {
-		_, err := c.Write(stringToSend)
+		_, err := c.Write(bufferToSend)
 		if err != nil {
 			log.Fatalf("error while sending to server: %s", err)
 		}
@@ -42,6 +45,7 @@ func client() {
 
 func main() {
 
+	flag.UintVar(&messageSize, "s", 1024, "message size in bytes")
 	flag.StringVar(&serverAddress, "a", ":11000", "server address to connect to")
 	flag.UintVar(&parallel, "p", 10, "how many parallel connections")
 	flag.Parse()
