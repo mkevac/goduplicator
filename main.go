@@ -34,7 +34,10 @@ func readAndDiscard(m mirror, errCh chan error) {
 		if err != nil {
 			m.conn.Close()
 			m.closed = true
-			errCh <- err
+			select {
+			case errCh <- err:
+			default:
+			}
 			return
 		}
 	}
@@ -147,7 +150,10 @@ func forwardAndZeroCopy(from net.Conn, to net.Conn, mirrors []mirror, errChForwa
 			for {
 				_, err = unix.Splice(m.mirrorPipe[0], nullPtr, int(m.mirrorFile.Fd()), nullPtr, MaxInt, SPLICE_F_MOVE)
 				if err != nil {
-					errChMirrors <- fmt.Errorf("error while splicing from pipe to conn: %s", err)
+					select {
+					case errChMirrors <- fmt.Errorf("error while splicing from pipe to conn: %s", err):
+					default:
+					}
 					return
 				}
 			}
@@ -172,7 +178,10 @@ func forwardAndZeroCopy(from net.Conn, to net.Conn, mirrors []mirror, errChForwa
 			if err != nil {
 				m.conn.Close()
 				m.closed = true
-				errChMirrors <- fmt.Errorf("error while tee(): %s", err)
+				select {
+				case errChMirrors <- fmt.Errorf("error while tee(): %s", err):
+				default:
+				}
 				return
 			}
 		}
@@ -210,7 +219,11 @@ func forwardAndCopy(from net.Conn, to net.Conn, mirrors []mirror, errChForwardee
 			if err != nil {
 				mirrors[i].conn.Close()
 				mirrors[i].closed = true
-				errChMirrors <- err
+				select {
+				case errChMirrors <- err:
+				default:
+				}
+
 			}
 		}
 	}
@@ -302,18 +315,19 @@ func main() {
 				}
 			}
 
-			errChForwardee := make(chan error)
-			errChMirrors := make(chan error)
+			errChForwardee := make(chan error, 2)
+			errChMirrors := make(chan error, len(mirrors))
 
 			connect(c, cF, mirrors, useZeroCopy, errChForwardee, errChMirrors)
 
-			for {
+			done := false
+			for !done {
 				select {
 				case err := <-errChMirrors:
 					log.Printf("got error from mirror: %s", err)
 				case err := <-errChForwardee:
 					log.Printf("got error from forwardee: %s", err)
-					break
+					done = true
 				}
 			}
 
