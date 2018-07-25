@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync/atomic"
 
 	"golang.org/x/sys/unix"
 )
@@ -24,7 +25,7 @@ const (
 type mirror struct {
 	addr   string
 	conn   net.Conn
-	closed bool
+	closed uint32
 }
 
 func readAndDiscard(m mirror, errCh chan error) {
@@ -33,7 +34,7 @@ func readAndDiscard(m mirror, errCh chan error) {
 		_, err := m.conn.Read(b[:])
 		if err != nil {
 			m.conn.Close()
-			m.closed = true
+			atomic.StoreUint32(&m.closed, 1)
 			select {
 			case errCh <- err:
 			default:
@@ -170,14 +171,14 @@ func forwardAndZeroCopy(from net.Conn, to net.Conn, mirrors []mirror, errChForwa
 		nteed := int64(MaxInt)
 
 		for _, m := range mirrorsInt {
-			if m.closed {
+			if closed := atomic.LoadUint32(&m.closed); closed == 1 {
 				continue
 			}
 
 			nteed, err = unix.Tee(p[0], m.mirrorPipe[1], MaxInt, SPLICE_F_MOVE)
 			if err != nil {
 				m.conn.Close()
-				m.closed = true
+				atomic.StoreUint32(&m.closed, 1)
 				select {
 				case errChMirrors <- fmt.Errorf("error while tee(): %s", err):
 				default:
@@ -212,13 +213,13 @@ func forwardAndCopy(from net.Conn, to net.Conn, mirrors []mirror, errChForwardee
 		}
 
 		for i := 0; i < len(mirrors); i++ {
-			if mirrors[i].closed {
+			if closed := atomic.LoadUint32(&mirrors[i].closed); closed == 1 {
 				continue
 			}
 			_, err = mirrors[i].conn.Write(b[:n])
 			if err != nil {
 				mirrors[i].conn.Close()
-				mirrors[i].closed = true
+				atomic.StoreUint32(&mirrors[i].closed, 1)
 				select {
 				case errChMirrors <- err:
 				default:
@@ -310,7 +311,7 @@ func main() {
 					mirrors = append(mirrors, mirror{
 						addr:   addr,
 						conn:   c,
-						closed: false,
+						closed: 0,
 					})
 				}
 			}
