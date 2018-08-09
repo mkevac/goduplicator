@@ -7,7 +7,9 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -196,6 +198,8 @@ func forwardAndZeroCopy(from net.Conn, to net.Conn, mirrors []mirror, errChForwa
 
 }
 
+var writeTimeout time.Duration
+
 func forwardAndCopy(from net.Conn, to net.Conn, mirrors []mirror, errChForwardee, errChMirrors chan error) {
 	for {
 		var b [defaultBufferSize]byte
@@ -216,6 +220,7 @@ func forwardAndCopy(from net.Conn, to net.Conn, mirrors []mirror, errChForwardee
 			if closed := atomic.LoadUint32(&mirrors[i].closed); closed == 1 {
 				continue
 			}
+			mirrors[i].conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 			_, err = mirrors[i].conn.Write(b[:n])
 			if err != nil {
 				mirrors[i].conn.Close()
@@ -260,8 +265,9 @@ func (l *mirrorList) Set(value string) error {
 }
 
 func main() {
-
 	var (
+		connectTimeout  time.Duration
+		delay           time.Duration
 		listenAddress   string
 		forwardAddress  string
 		mirrorAddresses mirrorList
@@ -272,8 +278,11 @@ func main() {
 	flag.StringVar(&listenAddress, "l", "", "listen address (e.g. 'localhost:8080')")
 	flag.StringVar(&forwardAddress, "f", "", "forward to address (e.g. 'localhost:8081')")
 	flag.Var(&mirrorAddresses, "m", "comma separated list of mirror addresses (e.g. 'localhost:8082,localhost:8083')")
-	flag.Parse()
+	flag.DurationVar(&connectTimeout, "t", 500*time.Millisecond, "mirror connect timeout")
+	flag.DurationVar(&delay, "d", 20*time.Second, "delay connecting to mirror after unsuccessful attempt")
+	flag.DurationVar(&writeTimeout, "wt", 20*time.Millisecond, "mirror write timeout")
 
+	flag.Parse()
 	if listenAddress == "" || forwardAddress == "" {
 		flag.Usage()
 		return
@@ -285,7 +294,8 @@ func main() {
 	}
 
 	connNo := uint64(1)
-
+	var lock sync.RWMutex
+	mirrorWake := make(map[string]time.Time)
 	for {
 		c, err := l.Accept()
 		if err != nil {
@@ -304,9 +314,19 @@ func main() {
 			var mirrors []mirror
 
 			for _, addr := range mirrorAddresses {
-				c, err := net.Dial("tcp", addr)
+				lock.RLock()
+				wake := mirrorWake[addr]
+				lock.RUnlock()
+				if wake.After(time.Now()) {
+					continue
+				}
+
+				c, err := net.DialTimeout("tcp", addr, connectTimeout)
 				if err != nil {
 					log.Printf("error while connecting to mirror %s: %s", addr, err)
+					lock.Lock()
+					mirrorWake[addr] = time.Now().Add(delay)
+					lock.Unlock()
 				} else {
 					mirrors = append(mirrors, mirror{
 						addr:   addr,
