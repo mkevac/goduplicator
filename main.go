@@ -3,6 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
+	"io/ioutil"
 	"log"
 	"net"
 	"os"
@@ -266,12 +268,13 @@ func (l *mirrorList) Set(value string) error {
 
 func main() {
 	var (
-		connectTimeout  time.Duration
-		delay           time.Duration
-		listenAddress   string
-		forwardAddress  string
-		mirrorAddresses mirrorList
-		useZeroCopy     bool
+		connectTimeout   time.Duration
+		delay            time.Duration
+		listenAddress    string
+		forwardAddress   string
+		mirrorAddresses  mirrorList
+		useZeroCopy      bool
+		mirrorCloseDelay time.Duration
 	)
 
 	flag.BoolVar(&useZeroCopy, "z", false, "use zero copy")
@@ -281,6 +284,7 @@ func main() {
 	flag.DurationVar(&connectTimeout, "t", 500*time.Millisecond, "mirror connect timeout")
 	flag.DurationVar(&delay, "d", 20*time.Second, "delay connecting to mirror after unsuccessful attempt")
 	flag.DurationVar(&writeTimeout, "wt", 20*time.Millisecond, "mirror write timeout")
+	flag.DurationVar(&mirrorCloseDelay, "mt", 0, "mirror conn close delay")
 
 	flag.Parse()
 	if listenAddress == "" || forwardAddress == "" {
@@ -305,10 +309,10 @@ func main() {
 		log.Printf("accepted connection %d (%s <-> %s)", connNo, c.RemoteAddr(), c.LocalAddr())
 
 		go func(c net.Conn) {
-
 			cF, err := net.Dial("tcp", forwardAddress)
 			if err != nil {
-				log.Fatalf("error while connecting to forwarder: %s", err)
+				log.Printf("error while connecting to forwarder: %s", err)
+				return
 			}
 
 			var mirrors []mirror
@@ -352,12 +356,20 @@ func main() {
 				}
 			}
 
+			for _, m := range mirrors {
+				go func(m mirror) {
+					if mirrorCloseDelay > 0 {
+						go func() {
+							io.Copy(ioutil.Discard, m.conn)
+						}()
+						time.Sleep(mirrorCloseDelay)
+					}
+					m.conn.Close()
+				}(m)
+			}
+
 			c.Close()
 			cF.Close()
-
-			for _, m := range mirrors {
-				m.conn.Close()
-			}
 		}(c)
 
 		connNo += 1
