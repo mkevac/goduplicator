@@ -20,10 +20,12 @@ You can download binary files here: https://github.com/mkevac/goduplicator/relea
 
 Install from source
 -------------------
-You would need Go language installed. Just execute this command:
+You would need Go language installed.
+Just execute this command
 ```
-go get github.com/mkevac/goduplicator
+go build
 ```
+inside the source code directory
 
 Usage
 -----
