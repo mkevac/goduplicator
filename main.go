@@ -54,13 +54,15 @@ func forward(from net.Conn, to net.Conn, errCh chan error) {
 
 		n, err := from.Read(b[:])
 		if err != nil {
-			errCh <- err
+			if err != io.EOF {
+				errCh <- fmt.Errorf("from.Read() failed: %w", err)
+			}
 			return
 		}
 
 		_, err = to.Write(b[:n])
 		if err != nil {
-			errCh <- err
+			errCh <- fmt.Errorf("to.Write() failed: %w", err)
 			return
 		}
 	}
@@ -208,13 +210,15 @@ func forwardAndCopy(from net.Conn, to net.Conn, mirrors []mirror, errChForwardee
 
 		n, err := from.Read(b[:])
 		if err != nil {
-			errChForwardee <- err
+			if err != io.EOF {
+				errChForwardee <- fmt.Errorf("from.Read() failed: %w", err)
+			}
 			return
 		}
 
 		_, err = to.Write(b[:n])
 		if err != nil {
-			errChForwardee <- err
+			errChForwardee <- fmt.Errorf("to.Write() failed: %w", err)
 			return
 		}
 
