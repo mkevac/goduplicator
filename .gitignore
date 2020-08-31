@@ -1,3 +1,5 @@
 .idea/
 dist/
 goduplicator
+cmd/goduplicatortestclient/goduplicatortestclient
+cmd/goduplicatortestserver/goduplicatortestserver

@@ -39,7 +39,7 @@ Usage
 Comparison to agnoster/duplicator
 ---------------------------------
 agnoster/duplicator on my tests gives about 46000 req/sec, while goduplicator gives approximately 76000 req/sec
-Client and Server used are in test/ directory.
+Client and Server used are in cmd/ directory.
 
 Server:
 ```
