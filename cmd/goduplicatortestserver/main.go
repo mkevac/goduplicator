@@ -3,34 +3,35 @@ package main
 import (
 	"bufio"
 	"flag"
+	"io"
 	"log"
 	"net"
 )
 
 func handleConnection(c net.Conn) {
+	defer c.Close()
+
 	r := bufio.NewReader(c)
 
 	for {
 		l, err := r.ReadBytes('\n')
 		if err != nil {
-			c.Close()
-			log.Printf("error while reading line: %s", err)
+			if err != io.EOF {
+				log.Printf("error while reading line: %s", err)
+			}
 			return
 		}
+
 		_, err = c.Write(l)
 		if err != nil {
-			c.Close()
 			log.Fatalf("error while writing: %s", err)
-			return
 		}
 	}
 }
 
-func main() {
-	var (
-		listeningAddress string
-	)
+var listeningAddress string
 
+func main() {
 	flag.StringVar(&listeningAddress, "l", ":11000", "listening address")
 	flag.Parse()
 
