@@ -4,12 +4,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"os"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -32,7 +30,7 @@ type mirror struct {
 	closed uint32
 }
 
-func readAndDiscard(m mirror, errCh chan error) {
+func readAndDiscard(m mirror, closeCh chan error) {
 	for {
 		var b [defaultBufferSize]byte
 		_, err := m.conn.Read(b[:])
@@ -40,7 +38,7 @@ func readAndDiscard(m mirror, errCh chan error) {
 			m.conn.Close()
 			atomic.StoreUint32(&m.closed, 1)
 			select {
-			case errCh <- err:
+			case closeCh <- err:
 			default:
 			}
 			return
@@ -48,62 +46,66 @@ func readAndDiscard(m mirror, errCh chan error) {
 	}
 }
 
-func forward(from net.Conn, to net.Conn, errCh chan error) {
+func forward(from net.Conn, to net.Conn, closeCh chan error) {
 	for {
 		var b [defaultBufferSize]byte
 
 		n, err := from.Read(b[:])
 		if err != nil {
 			if err != io.EOF {
-				errCh <- fmt.Errorf("from.Read() failed: %w", err)
+				closeCh <- fmt.Errorf("from.Read() failed: %w", err)
+			} else {
+				closeCh <- nil
 			}
 			return
 		}
 
 		_, err = to.Write(b[:n])
 		if err != nil {
-			errCh <- fmt.Errorf("to.Write() failed: %w", err)
+			closeCh <- fmt.Errorf("to.Write() failed: %w", err)
 			return
 		}
 	}
 }
 
-func forwardZeroCopy(from net.Conn, to net.Conn, errCh chan error) {
+func forwardZeroCopy(from net.Conn, to net.Conn, closeCh chan error) {
 	var (
 		p       [2]int
 		nullPtr *int64
 	)
 
-	err := unix.Pipe(p[:])
-	if err != nil {
-		log.Fatalf("pipe() error: %s", err)
+	if err := unix.Pipe(p[:]); err != nil {
+		closeCh <- fmt.Errorf("pipe() error: %w", err)
+		return
 	}
 
 	fromFile, err := from.(*net.TCPConn).File()
 	if err != nil {
-		log.Fatalf("error while creating File() from incoming connection: %s", err)
+		closeCh <- fmt.Errorf("error while creating File() from incoming connection: %w", err)
+		return
 	}
 
 	toFile, err := to.(*net.TCPConn).File()
 	if err != nil {
-		log.Fatalf("error while creating File() from outgoing connection: %s", err)
+		closeCh <- fmt.Errorf("error while creating File() from outgoing connection: %w", err)
+		return
 	}
 
 	for {
 		_, err = unix.Splice(int(fromFile.Fd()), nullPtr, p[1], nullPtr, MaxInt, SPLICE_F_MOVE)
 		if err != nil {
-			errCh <- fmt.Errorf("error while splicing from conn to pipe: %s", err)
+			closeCh <- fmt.Errorf("error while splicing from conn to pipe: %w", err)
 			return
 		}
 		_, err = unix.Splice(p[0], nullPtr, int(toFile.Fd()), nullPtr, MaxInt, SPLICE_F_MOVE)
 		if err != nil {
-			errCh <- fmt.Errorf("error while splicing from pipe to conn: %s", err)
+			closeCh <- fmt.Errorf("error while splicing from pipe to conn: %w", err)
 			return
 		}
 	}
 }
 
-func forwardAndZeroCopy(from net.Conn, to net.Conn, mirrors []mirror, errChForwardee, errChMirrors chan error) {
+func forwardAndZeroCopy(from net.Conn, to net.Conn, mirrors []mirror, closeCh, errorCh chan error) {
 	type mirrorInt struct {
 		mirror
 		mirrorFile *os.File
@@ -116,32 +118,34 @@ func forwardAndZeroCopy(from net.Conn, to net.Conn, mirrors []mirror, errChForwa
 		mirrorsInt []mirrorInt
 	)
 
-	err := unix.Pipe(p[:])
-	if err != nil {
-		log.Fatalf("pipe() error: %s", err)
+	if err := unix.Pipe(p[:]); err != nil {
+		errorCh <- fmt.Errorf("pipe() error: %w", err)
+		return
 	}
 
 	fromFile, err := from.(*net.TCPConn).File()
 	if err != nil {
-		log.Fatalf("error while creating File() from incoming connection: %s", err)
+		errorCh <- fmt.Errorf("error while creating File() from incoming connection: %w", err)
+		return
 	}
 
 	toFile, err := to.(*net.TCPConn).File()
 	if err != nil {
-		log.Fatalf("error while creating File() from outgoing connection: %s", err)
+		errorCh <- fmt.Errorf("error while creating File() from outgoing connection: %w", err)
+		return
 	}
 
 	for _, m := range mirrors {
 		mFile, err := m.conn.(*net.TCPConn).File()
 		if err != nil {
-			log.Fatalf("error while creating File() from incoming connection: %s", err)
+			errorCh <- fmt.Errorf("error while creating File() from mirror connection: %w", err)
 		}
 
 		var mPipe [2]int
 
-		err = unix.Pipe(mPipe[:])
-		if err != nil {
-			log.Fatalf("pipe() error: %s", err)
+		if err := unix.Pipe(mPipe[:]); err != nil {
+			errorCh <- fmt.Errorf("pipe() error: %w", err)
+			return
 		}
 
 		mirrorsInt = append(mirrorsInt, mirrorInt{
@@ -152,13 +156,12 @@ func forwardAndZeroCopy(from net.Conn, to net.Conn, mirrors []mirror, errChForwa
 	}
 
 	for _, m := range mirrorsInt {
-
 		go func(m mirrorInt) { // splice data from pipe to conn
 			for {
 				_, err = unix.Splice(m.mirrorPipe[0], nullPtr, int(m.mirrorFile.Fd()), nullPtr, MaxInt, SPLICE_F_MOVE)
 				if err != nil {
 					select {
-					case errChMirrors <- fmt.Errorf("error while splicing from pipe to conn: %s", err):
+					case errorCh <- fmt.Errorf("error while splicing from pipe to conn: %w", err):
 					default:
 					}
 					return
@@ -170,7 +173,7 @@ func forwardAndZeroCopy(from net.Conn, to net.Conn, mirrors []mirror, errChForwa
 	for {
 		_, err = unix.Splice(int(fromFile.Fd()), nullPtr, p[1], nullPtr, MaxInt, SPLICE_F_MOVE)
 		if err != nil {
-			errChForwardee <- fmt.Errorf("error while splicing from conn to pipe: %s", err)
+			closeCh <- fmt.Errorf("error while splicing from conn to pipe: %w", err)
 			return
 		}
 
@@ -186,39 +189,39 @@ func forwardAndZeroCopy(from net.Conn, to net.Conn, mirrors []mirror, errChForwa
 				m.conn.Close()
 				atomic.StoreUint32(&m.closed, 1)
 				select {
-				case errChMirrors <- fmt.Errorf("error while tee(): %s", err):
+				case errorCh <- fmt.Errorf("error while tee(): %w", err):
 				default:
 				}
-				return
 			}
 		}
 
 		_, err = unix.Splice(p[0], nullPtr, int(toFile.Fd()), nullPtr, int(nteed), SPLICE_F_MOVE)
 		if err != nil {
-			errChForwardee <- fmt.Errorf("error while splice(): %s", err)
+			closeCh <- fmt.Errorf("error while splice(): %w", err)
 			return
 		}
 	}
-
 }
 
 var writeTimeout time.Duration
 
-func forwardAndCopy(from net.Conn, to net.Conn, mirrors []mirror, errChForwardee, errChMirrors chan error) {
+func forwardAndCopy(from net.Conn, to net.Conn, mirrors []mirror, closeCh, errorCh chan error) {
 	for {
 		var b [defaultBufferSize]byte
 
 		n, err := from.Read(b[:])
 		if err != nil {
 			if err != io.EOF {
-				errChForwardee <- fmt.Errorf("from.Read() failed: %w", err)
+				closeCh <- fmt.Errorf("from.Read() failed: %w", err)
+			} else {
+				closeCh <- nil
 			}
 			return
 		}
 
 		_, err = to.Write(b[:n])
 		if err != nil {
-			errChForwardee <- fmt.Errorf("to.Write() failed: %w", err)
+			closeCh <- fmt.Errorf("to.Write() failed: %w", err)
 			return
 		}
 
@@ -226,13 +229,15 @@ func forwardAndCopy(from net.Conn, to net.Conn, mirrors []mirror, errChForwardee
 			if closed := atomic.LoadUint32(&mirrors[i].closed); closed == 1 {
 				continue
 			}
+
 			mirrors[i].conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+
 			_, err = mirrors[i].conn.Write(b[:n])
 			if err != nil {
 				mirrors[i].conn.Close()
 				atomic.StoreUint32(&mirrors[i].closed, 1)
 				select {
-				case errChMirrors <- err:
+				case errorCh <- err:
 				default:
 				}
 
@@ -241,18 +246,18 @@ func forwardAndCopy(from net.Conn, to net.Conn, mirrors []mirror, errChForwardee
 	}
 }
 
-func connect(origin net.Conn, forwarder net.Conn, mirrors []mirror, useZeroCopy bool, errChForwardee, errChMirrors chan error) {
+func connect(origin net.Conn, forwarder net.Conn, mirrors []mirror, useZeroCopy bool, closeCh chan error, errorCh chan error) {
 
 	for i := 0; i < len(mirrors); i++ {
-		go readAndDiscard(mirrors[i], errChMirrors)
+		go readAndDiscard(mirrors[i], closeCh)
 	}
 
 	if useZeroCopy {
-		go forwardZeroCopy(forwarder, origin, errChForwardee)
-		go forwardAndZeroCopy(origin, forwarder, mirrors, errChForwardee, errChMirrors)
+		go forwardZeroCopy(forwarder, origin, closeCh)
+		go forwardAndZeroCopy(origin, forwarder, mirrors, closeCh, errorCh)
 	} else {
-		go forward(forwarder, origin, errChForwardee)
-		go forwardAndCopy(origin, forwarder, mirrors, errChForwardee, errChMirrors)
+		go forward(forwarder, origin, closeCh)
+		go forwardAndCopy(origin, forwarder, mirrors, closeCh, errorCh)
 	}
 
 }
@@ -272,13 +277,12 @@ func (l *mirrorList) Set(value string) error {
 
 func main() {
 	var (
-		connectTimeout   time.Duration
-		delay            time.Duration
-		listenAddress    string
-		forwardAddress   string
-		mirrorAddresses  mirrorList
-		useZeroCopy      bool
-		mirrorCloseDelay time.Duration
+		connectTimeout  time.Duration
+		delay           time.Duration
+		listenAddress   string
+		forwardAddress  string
+		mirrorAddresses mirrorList
+		useZeroCopy     bool
 	)
 
 	flag.BoolVar(&useZeroCopy, "z", false, "use zero copy")
@@ -288,9 +292,9 @@ func main() {
 	flag.DurationVar(&connectTimeout, "t", 500*time.Millisecond, "mirror connect timeout")
 	flag.DurationVar(&delay, "d", 20*time.Second, "delay connecting to mirror after unsuccessful attempt")
 	flag.DurationVar(&writeTimeout, "wt", 20*time.Millisecond, "mirror write timeout")
-	flag.DurationVar(&mirrorCloseDelay, "mt", 0, "mirror conn close delay")
 
 	flag.Parse()
+
 	if listenAddress == "" || forwardAddress == "" {
 		flag.Usage()
 		return
@@ -301,79 +305,70 @@ func main() {
 		log.Fatalf("error while listening: %s", err)
 	}
 
-	connNo := uint64(1)
-	var lock sync.RWMutex
-	mirrorWake := make(map[string]time.Time)
+	var connNo uint64
+
 	for {
 		c, err := l.Accept()
 		if err != nil {
-			log.Fatalf("Error while accepting: %s", err)
+			log.Printf("Error while accepting: %s", err)
+			continue
 		}
 
 		log.Printf("accepted connection %d (%s <-> %s)", connNo, c.RemoteAddr(), c.LocalAddr())
 
-		go func(c net.Conn) {
-			cF, err := net.Dial("tcp", forwardAddress)
+		go func(connClient net.Conn) {
+			defer connClient.Close()
+
+			connForwardee, err := net.Dial("tcp", forwardAddress)
 			if err != nil {
-				log.Printf("error while connecting to forwarder: %s", err)
+				log.Printf("error while connecting to forwarder (%s), will close client connection", err)
 				return
 			}
+			defer connForwardee.Close()
 
 			var mirrors []mirror
 
 			for _, addr := range mirrorAddresses {
-				lock.RLock()
-				wake := mirrorWake[addr]
-				lock.RUnlock()
-				if wake.After(time.Now()) {
+				connMirror, err := net.DialTimeout("tcp", addr, connectTimeout)
+				if err != nil {
+					log.Printf("error while connecting to mirror %s (%s), will continue", addr, err)
 					continue
 				}
 
-				c, err := net.DialTimeout("tcp", addr, connectTimeout)
-				if err != nil {
-					log.Printf("error while connecting to mirror %s: %s", addr, err)
-					lock.Lock()
-					mirrorWake[addr] = time.Now().Add(delay)
-					lock.Unlock()
-				} else {
-					mirrors = append(mirrors, mirror{
-						addr:   addr,
-						conn:   c,
-						closed: 0,
-					})
-				}
+				mirrors = append(mirrors, mirror{
+					addr:   addr,
+					conn:   connMirror,
+					closed: 0,
+				})
 			}
 
-			errChForwardee := make(chan error, 2)
-			errChMirrors := make(chan error, len(mirrors))
-
-			connect(c, cF, mirrors, useZeroCopy, errChForwardee, errChMirrors)
-
-			done := false
-			for !done {
-				select {
-				case err := <-errChMirrors:
-					log.Printf("got error from mirror: %s", err)
-				case err := <-errChForwardee:
-					log.Printf("got error from forwardee: %s", err)
-					done = true
-				}
-			}
-
-			for _, m := range mirrors {
-				go func(m mirror) {
-					if mirrorCloseDelay > 0 {
-						go func() {
-							io.Copy(ioutil.Discard, m.conn)
-						}()
-						time.Sleep(mirrorCloseDelay)
+			defer func() {
+				for i, m := range mirrors {
+					if closed := atomic.LoadUint32(&mirrors[i].closed); closed == 1 {
+						continue
 					}
 					m.conn.Close()
-				}(m)
-			}
+				}
+			}()
 
-			c.Close()
-			cF.Close()
+			closeCh := make(chan error, 1024)
+			errorCh := make(chan error, 1024)
+
+			connect(connClient, connForwardee, mirrors, useZeroCopy, closeCh, errorCh)
+
+			for {
+				select {
+				case err := <-errorCh:
+					if err != nil {
+						log.Printf("got error (%s), will continue", err)
+					}
+				case err := <-closeCh:
+					if err != nil {
+						log.Printf("got error (%s), will close client connection", err)
+					}
+					return
+				}
+			}
 		}(c)
 
 		connNo += 1
