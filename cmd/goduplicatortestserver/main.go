@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"io"
 	"log"
@@ -24,7 +25,7 @@ func statsPrinter() {
 
 func handleConnection(c net.Conn) {
 	atomic.AddUint64(&connections, 1)
-	defer atomic.AddUint64(&connections, ^uint64(1))
+	defer atomic.AddUint64(&connections, ^uint64(0))
 	defer c.Close()
 
 	r := bufio.NewReader(c)
@@ -32,7 +33,7 @@ func handleConnection(c net.Conn) {
 	for {
 		l, err := r.ReadBytes('\n')
 		if err != nil {
-			if err != io.EOF {
+			if !errors.Is(err, io.EOF) {
 				log.Printf("error while reading line: %s", err)
 			}
 			return
